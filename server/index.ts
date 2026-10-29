@@ -777,15 +777,19 @@ app.post('/api/client/bookings/:id/reschedule', auth(), (req, res) => {
   ) as any;
 
   if (!b) return res.status(404).json({ error: 'Booking not found.' });
+  if (b.status !== 'confirmed') {
+    return res.status(409).json({ error: 'Only confirmed bookings can be rescheduled.' });
+  }
 
   const s = z.object({
     event_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     start_time: z.string().regex(/^\d{2}:\d{2}$/),
     end_time: z.string().regex(/^\d{2}:\d{2}$/),
+    attendees: z.coerce.number().int().positive(),
   }).safeParse(req.body);
 
   if (!s.success || s.data.end_time <= s.data.start_time) {
-    return res.status(400).json({ error: 'Provide a valid new date and start/end times.' });
+    return res.status(400).json({ error: 'Provide a valid new date, start/end times, and positive attendee count.' });
   }
 
   // 1. Compute reserved window
@@ -813,7 +817,7 @@ app.post('/api/client/bookings/:id/reschedule', auth(), (req, res) => {
       event_date: s.data.event_date,
       start_time: s.data.start_time,
       end_time: s.data.end_time,
-      attendees: b.attendees,
+      attendees: s.data.attendees,
       preferred_venue_id: b.venue_id,
       projectors: b.projectors,
       audio_systems: b.audio_systems,
@@ -833,48 +837,64 @@ app.post('/api/client/bookings/:id/reschedule', auth(), (req, res) => {
     });
   }
 
-  // Allocation succeeded for new time window: Update booking!
-  db.prepare(`
-    UPDATE bookings
-    SET event_date = ?,
-        start_time = ?,
-        end_time = ?,
-        reserved_start = ?,
-        reserved_end = ?,
-        allocated_venue_id = ?,
-        hall_id = ?,
-        decision_note = ?,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(
-    s.data.event_date,
-    s.data.start_time,
-    s.data.end_time,
-    reservedWindow.reservedStart,
-    reservedWindow.reservedEnd,
-    alloc.allocated_venue_id,
-    alloc.allocated_hall_id,
-    `Rescheduled to ${s.data.event_date} (${s.data.start_time}–${s.data.end_time}) in Hall ${alloc.allocated_hall_name}.`,
-    b.id
+  const durationHours = (reservedWindow.endMinutes - reservedWindow.startMinutes) / 60;
+  const pricing = calculateEventPricing(durationHours, 3500, b.staff);
+  const existingPayments = Number(
+    (db.prepare('SELECT coalesce(sum(amount), 0) total FROM payments WHERE booking_id=?').get(b.id) as any).total
   );
+  const amountPaid = Math.max(Number(b.advance_paid || 0), existingPayments);
+  const balanceDue = Math.max(0, pricing.totalAmount - amountPaid);
+  const paymentStatus = balanceDue === 0
+    ? 'fully_paid'
+    : amountPaid >= pricing.advanceDeposit
+      ? 'advance_paid'
+      : 'advance_pending';
+  const rescheduleNote = `Rescheduled to ${s.data.event_date} (${s.data.start_time}–${s.data.end_time}) for ${s.data.attendees} attendees in ${alloc.allocated_venue_name}, Hall ${alloc.allocated_hall_name}.`;
 
-  db.prepare('INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,?,?)').run(
-    b.id,
-    req.session.user!.id,
-    'rescheduled',
-    `Rescheduled to ${s.data.event_date} ${s.data.start_time}–${s.data.end_time}.`
-  );
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE bookings
+      SET event_date=?, start_time=?, end_time=?, attendees=?,
+          reserved_start=?, reserved_end=?, allocated_venue_id=?, hall_id=?,
+          amount_due=?, balance_due=?, payment_status=?, decision_note=?,
+          updated_at=CURRENT_TIMESTAMP
+      WHERE id=?
+    `).run(
+      s.data.event_date,
+      s.data.start_time,
+      s.data.end_time,
+      s.data.attendees,
+      reservedWindow.reservedStart,
+      reservedWindow.reservedEnd,
+      alloc.allocated_venue_id,
+      alloc.allocated_hall_id,
+      pricing.totalAmount,
+      balanceDue,
+      paymentStatus,
+      rescheduleNote,
+      b.id
+    );
+
+    db.prepare('INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,?,?)').run(
+      b.id,
+      req.session.user!.id,
+      'rescheduled',
+      rescheduleNote
+    );
+  })();
 
   const promoted = promoteWaitlistFifo();
   res.json({
     ok: true,
     message: `Rescheduled successfully to ${s.data.event_date} in Hall ${alloc.allocated_hall_name}!`,
     promoted_from_waitlist: promoted,
+    pricing,
     booking: {
       id: b.id,
       event_date: s.data.event_date,
       start_time: s.data.start_time,
       end_time: s.data.end_time,
+      attendees: s.data.attendees,
       hall: alloc.allocated_hall_name,
       venue: alloc.allocated_venue_name,
     },

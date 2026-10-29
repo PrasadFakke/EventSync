@@ -14,6 +14,25 @@ type User = { id: number; email: string; role: 'client' | 'manager'; name: strin
 const C = createContext<{ user: User | null; refresh: () => Promise<void> }>({ user: null, refresh: async () => {} });
 const useAuth = () => useContext(C);
 const img = 'https://images.unsplash.com/photo-1519167758481-83f550bb49b3?auto=format&fit=crop&w=1600&q=85';
+const venueFallbackImages: Record<string, string> = {
+  A: img,
+  B: 'https://images.unsplash.com/photo-1511578314322-379afb476865?auto=format&fit=crop&w=1200&q=85',
+  C: 'https://images.unsplash.com/photo-1464366400600-7168b8af9bc3?auto=format&fit=crop&w=1200&q=85',
+};
+
+function venueImage(v: any): string {
+  return v.images?.find((image: any) => image.cover)?.path
+    || v.images?.[0]?.path
+    || venueFallbackImages[v.code]
+    || venueFallbackImages.A;
+}
+
+function fallbackVenueImage(event: React.SyntheticEvent<HTMLImageElement>, v: any) {
+  const image = event.currentTarget;
+  if (image.dataset.fallbackApplied) return;
+  image.dataset.fallbackApplied = 'true';
+  image.src = venueFallbackImages[v.code] || venueFallbackImages.A;
+}
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -246,14 +265,7 @@ function VenueCard({ v, index = 0 }: { v: any; index?: number }) {
   return (
     <Link to={'/venues/' + v.id} className={'venue-card card-' + index}>
       <div className="venue-photo">
-        <img
-          src={v.images?.find((x: any) => x.cover)?.path || [
-            img,
-            'https://images.unsplash.com/photo-1511578314322-379afb476865?auto=format&fit=crop&w=900&q=80',
-            'https://images.unsplash.com/photo-1464366400600-7168b8af9bc3?auto=format&fit=crop&w=900&q=80'
-          ][index % 3]}
-          alt={v.name}
-        />
+        <img src={venueImage(v)} alt={v.name} onError={event => fallbackVenueImage(event, v)} />
         <span>VENUE {v.code}</span>
         <ArrowUpRight />
       </div>
@@ -326,7 +338,7 @@ function Venue() {
       <main className="venue-detail">
         <Link to="/explore" className="text-link">← All venues</Link>
         <div className="detail-hero">
-          <img src={v.images?.[0]?.path || img} alt={v.name} />
+          <img src={venueImage(v)} alt={v.name} onError={event => fallbackVenueImage(event, v)} />
           <div>
             <span className="eyebrow">VENUE {v.code} · {v.category}</span>
             <h1>{v.name}<br /><i>in Mumbai.</i></h1>
@@ -1635,6 +1647,60 @@ function NewBookingRequestForm({ reload }: { reload?: () => void }) {
 
 // ======================== BOOKING TABLE COMPONENT ========================
 function BookingTable({ rows, manager, reload }: { rows: any[]; manager: boolean; reload: () => void }) {
+  const [reschedulingBooking, setReschedulingBooking] = useState<any>(null);
+  const [rescheduleForm, setRescheduleForm] = useState({ event_date: '', start_time: '', end_time: '', attendees: '' });
+  const [rescheduleError, setRescheduleError] = useState('');
+  const [rescheduleSubmitting, setRescheduleSubmitting] = useState(false);
+
+  function openReschedule(b: any) {
+    setReschedulingBooking(b);
+    setRescheduleForm({
+      event_date: b.event_date,
+      start_time: b.start_time,
+      end_time: b.end_time,
+      attendees: String(b.attendees),
+    });
+    setRescheduleError('');
+  }
+
+  function closeReschedule() {
+    if (rescheduleSubmitting) return;
+    setReschedulingBooking(null);
+    setRescheduleError('');
+  }
+
+  useEffect(() => {
+    if (!reschedulingBooking) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !rescheduleSubmitting) closeReschedule();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [reschedulingBooking, rescheduleSubmitting]);
+
+  async function submitReschedule(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!reschedulingBooking || rescheduleSubmitting) return;
+    setRescheduleSubmitting(true);
+    setRescheduleError('');
+    try {
+      const res = await api(`/client/bookings/${reschedulingBooking.id}/reschedule`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...rescheduleForm,
+          attendees: Number(rescheduleForm.attendees),
+        }),
+      });
+      setReschedulingBooking(null);
+      alert(`${res.message} Updated total: ₹${res.pricing.totalAmount}.`);
+      reload();
+    } catch (e: any) {
+      setRescheduleError(e.message || 'Unable to reschedule this booking.');
+    } finally {
+      setRescheduleSubmitting(false);
+    }
+  }
+
   async function decide(id: number, status: string) {
     const note = status === 'rejected' ? prompt('Reason for rejection?') || 'Rejected by manager' : '';
     try {
@@ -1659,42 +1725,23 @@ function BookingTable({ rows, manager, reload }: { rows: any[]; manager: boolean
     }
   }
 
-  async function promptReschedule(b: any) {
-    const newDate = prompt('New Date (YYYY-MM-DD):', b.event_date);
-    if (!newDate) return;
-    const newStart = prompt('New Start Time (HH:MM):', b.start_time);
-    if (!newStart) return;
-    const newEnd = prompt('New End Time (HH:MM):', b.end_time);
-    if (!newEnd) return;
-
-    try {
-      const res = await api(`/client/bookings/${b.id}/reschedule`, {
-        method: 'POST',
-        body: JSON.stringify({ event_date: newDate, start_time: newStart, end_time: newEnd }),
-      });
-      alert(res.message);
-      reload();
-    } catch (e: any) {
-      alert(e.message);
-    }
-  }
-
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>EVENT</th>
-            <th>{manager ? 'CLIENT / ORG' : 'ALLOCATED VENUE & HALL'}</th>
-            <th>DATE & RESERVED INTERVAL</th>
-            <th>ATTENDEES</th>
-            <th>STATUS</th>
-            <th>ACTIONS</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows?.map(b => (
-            <tr key={b.id}>
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>EVENT</th>
+              <th>{manager ? 'CLIENT / ORG' : 'ALLOCATED VENUE & HALL'}</th>
+              <th>DATE & RESERVED INTERVAL</th>
+              <th>ATTENDEES</th>
+              <th>STATUS</th>
+              <th>ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows?.map(b => (
+              <tr key={b.id}>
               <td>
                 <b>{b.title}</b>
                 <small>Ref: {b.booking_reference || `#${b.id}`}</small>
@@ -1751,18 +1798,105 @@ function BookingTable({ rows, manager, reload }: { rows: any[]; manager: boolean
                 ) : (
                   b.status === 'confirmed' ? (
                     <div className="flex gap-1">
-                      <button className="mini-action" onClick={() => promptReschedule(b)}>Reschedule</button>
+                      <button className="mini-action" onClick={() => openReschedule(b)}>Reschedule</button>
                       <button className="mini-action reject" onClick={() => cancelBooking(b.id)}>Cancel</button>
                     </div>
                   ) : '—'
                 )}
               </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {!rows?.length && <div className="empty">No bookings found.</div>}
-    </div>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows?.length && <div className="empty">No bookings found.</div>}
+      </div>
+      {reschedulingBooking && (
+        <div
+          className="reschedule-overlay"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) closeReschedule();
+          }}
+        >
+          <section
+            className="reschedule-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reschedule-title"
+          >
+            <div className="reschedule-dialog-heading">
+              <div>
+                <span className="eyebrow">UPDATE YOUR EVENT</span>
+                <h2 id="reschedule-title">Reschedule booking</h2>
+                <p>{reschedulingBooking.title}</p>
+              </div>
+              <button
+                type="button"
+                className="reschedule-close"
+                onClick={closeReschedule}
+                aria-label="Close reschedule form"
+                disabled={rescheduleSubmitting}
+              >
+                <X size={19} />
+              </button>
+            </div>
+            <form className="reschedule-form" onSubmit={submitReschedule}>
+              <label>
+                <span>Event date</span>
+                <input
+                  type="date"
+                  required
+                  value={rescheduleForm.event_date}
+                  onChange={event => setRescheduleForm(form => ({ ...form, event_date: event.target.value }))}
+                />
+              </label>
+              <div className="reschedule-form-row">
+                <label>
+                  <span>Start time</span>
+                  <input
+                    type="time"
+                    required
+                    value={rescheduleForm.start_time}
+                    onChange={event => setRescheduleForm(form => ({ ...form, start_time: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  <span>End time</span>
+                  <input
+                    type="time"
+                    required
+                    value={rescheduleForm.end_time}
+                    onChange={event => setRescheduleForm(form => ({ ...form, end_time: event.target.value }))}
+                  />
+                </label>
+              </div>
+              <label>
+                <span>Number of attendees</span>
+                <input
+                  type="number"
+                  min="1"
+                  required
+                  value={rescheduleForm.attendees}
+                  onChange={event => setRescheduleForm(form => ({ ...form, attendees: event.target.value }))}
+                />
+              </label>
+              <p className="reschedule-hint">
+                We’ll recheck hall capacity, shared resources, setup and cleanup buffers, and update the booking estimate.
+              </p>
+              {rescheduleError && <div className="reschedule-error" role="alert">{rescheduleError}</div>}
+              <div className="reschedule-dialog-actions">
+                <button type="button" className="button button-ghost small" onClick={closeReschedule} disabled={rescheduleSubmitting}>
+                  Keep current booking
+                </button>
+                <button type="submit" className="button button-red small" disabled={rescheduleSubmitting}>
+                  {rescheduleSubmitting ? 'Checking availability…' : 'Confirm reschedule'}
+                  {!rescheduleSubmitting && <Check size={16} />}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+    </>
   );
 }
 

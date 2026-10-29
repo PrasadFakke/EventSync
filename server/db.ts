@@ -253,10 +253,10 @@ export function seed() {
     const venueList = [
       {
         code: 'A',
-        name: 'Venue A - Grand Convention Center',
-        short: 'A thoughtfully equipped space for focused conferences and gatherings.',
-        desc: 'Flexible event venue in Bandra Kurla Complex with comprehensive AV inventory and support crew.',
-        address: 'Bandra Kurla Complex, Mumbai',
+        name: 'Atrium House at BKC',
+        short: 'A polished conference venue for leadership events, workshops, and launches.',
+        desc: 'A flexible business-events venue in Bandra Kurla Complex with two configurable halls, modern AV, and an experienced support team.',
+        address: 'Bandra Kurla Complex, Mumbai, Maharashtra 400051',
         category: 'Conference venue',
         types: 'Conferences,Workshops,Product launches',
         open: '08:00',
@@ -271,10 +271,10 @@ export function seed() {
       },
       {
         code: 'B',
-        name: 'Venue B - Highline Arena',
-        short: 'A versatile venue for workshops, exhibitions, and larger celebrations.',
-        desc: 'Adaptable halls for corporate conferences, exhibitions and technology events in Lower Parel.',
-        address: 'Senapati Bapat Marg, Lower Parel, Mumbai',
+        name: 'Harbourlight Convention Centre',
+        short: 'A versatile Worli destination for conferences, exhibitions, and company events.',
+        desc: 'A modern convention space in central Mumbai with flexible event halls, shared AV facilities, and dedicated event support.',
+        address: 'Worli, Mumbai, Maharashtra 400018',
         category: 'Event venue',
         types: 'Conferences,Workshops,Exhibitions',
         open: '08:00',
@@ -289,10 +289,10 @@ export function seed() {
       },
       {
         code: 'C',
-        name: 'Venue C - Expo Pavilion & Grounds',
-        short: 'An expansive setting for massive exhibitions and product showcases.',
-        desc: 'Large format halls with expansive shared AV and experienced support personnel.',
-        address: 'Western Express Highway, Goregaon East, Mumbai',
+        name: 'Powai Lakeview Events Pavilion',
+        short: 'A spacious lakeside setting for showcases, summits, and large gatherings.',
+        desc: 'A contemporary Powai venue with a large-format pavilion, flexible breakout space, and comprehensive production support.',
+        address: 'Powai, Mumbai, Maharashtra 400076',
         category: 'Exhibition venue',
         types: 'Exhibitions,Product launches,Conferences',
         open: '08:00',
@@ -329,59 +329,166 @@ export function seed() {
     }
   }
 
-  // 3. Seed Sample Situation Bookings (from Hackathon prompt)
-  // Venue A receives:
-  // 1. Conference (120 guests, 10:00-13:00, 1 proj, 3 staff) -> Confirmed in A2 (buffer 09:30-13:30)
-  // 2. Workshop (50 guests, 11:00-14:00, 1 proj, 2 staff) -> Confirmed in A1 (buffer 10:30-14:30)
+  // 3. Seed a small set of realistic upcoming demonstration events.
   const bookingCount = Number((db.prepare('SELECT count(*) n FROM bookings').get() as any).n);
   if (bookingCount === 0) {
     const venueA = db.prepare("SELECT * FROM venues WHERE code='A'").get() as any;
     const hallA1 = db.prepare("SELECT * FROM halls WHERE venue_id=? AND name='A1'").get(venueA.id) as any;
     const hallA2 = db.prepare("SELECT * FROM halls WHERE venue_id=? AND name='A2'").get(venueA.id) as any;
+    const venueB = db.prepare("SELECT * FROM venues WHERE code='B'").get() as any;
+    const hallB2 = db.prepare("SELECT * FROM halls WHERE venue_id=? AND name='B2'").get(venueB.id) as any;
+    const venueC = db.prepare("SELECT * FROM venues WHERE code='C'").get() as any;
+    const hallC1 = db.prepare("SELECT * FROM halls WHERE venue_id=? AND name='C1'").get(venueC.id) as any;
     const clientUser = db.prepare("SELECT * FROM users WHERE role='client' ORDER BY id ASC").get() as any;
 
-    if (venueA && hallA1 && hallA2 && clientUser) {
-      const sampleDate = '2026-10-30';
+    if (venueA && hallA1 && hallA2 && venueB && hallB2 && venueC && hallC1 && clientUser) {
+      const sampleDay = new Date();
+      sampleDay.setDate(sampleDay.getDate() + 7);
+      const sampleDate = [
+        sampleDay.getFullYear(),
+        String(sampleDay.getMonth() + 1).padStart(2, '0'),
+        String(sampleDay.getDate()).padStart(2, '0'),
+      ].join('-');
 
-      // Booking 1: Conference
-      db.prepare(`
+      const insertSampleBooking = db.prepare(`
         INSERT INTO bookings (
           booking_reference, client_id, venue_id, allocated_venue_id, hall_id,
           title, event_type, event_date, start_time, end_time,
-          reserved_start, reserved_end, attendees,
-          projectors, audio_systems, staff,
-          status, amount_due, advance_paid, balance_due, payment_status,
-          decision_note
-        ) VALUES (
-          'ES-2026-A-CONF', ?, ?, ?, ?,
-          'Tech Leadership Annual Conference', 'Conference', ?, '10:00', '13:00',
-          '09:30', '13:30', 120,
-          1, 0, 3,
-          'confirmed', 18000, 4500, 13500, 'advance_paid',
-          'Confirmed in Hall A2 (capacity 150). Setup buffer begins 09:30, cleanup ends 13:30.'
-        )
-      `).run(clientUser.id, venueA.id, venueA.id, hallA2.id, sampleDate);
+          reserved_start, reserved_end, attendees, projectors, audio_systems, staff,
+          status, amount_due, advance_paid, balance_due, payment_status, decision_note
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `);
+      const insertSampleHistory = db.prepare(
+        "INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,'confirmed',?)"
+      );
+      const events = [
+        {
+          reference: 'ES-DEMO-A-FORUM',
+          venue: venueA,
+          hall: hallA2,
+          title: 'BKC Leadership & Innovation Summit',
+          type: 'Conference',
+          start: '10:00',
+          end: '13:00',
+          reservedStart: '09:30',
+          reservedEnd: '13:30',
+          attendees: 120,
+          projectors: 1,
+          audio: 1,
+          staff: 3,
+          total: 29736,
+          advance: 7434,
+          balance: 22302,
+          note: 'Sample confirmed booking. Includes 30-minute setup and cleanup buffers.',
+        },
+        {
+          reference: 'ES-DEMO-A-WORKSHOP',
+          venue: venueA,
+          hall: hallA1,
+          title: 'Creative Strategy Workshop',
+          type: 'Workshop',
+          start: '11:00',
+          end: '14:00',
+          reservedStart: '10:30',
+          reservedEnd: '14:30',
+          attendees: 50,
+          projectors: 1,
+          audio: 0,
+          staff: 2,
+          total: 19824,
+          advance: 4956,
+          balance: 14868,
+          note: 'Sample concurrent booking demonstrating shared venue resource allocation.',
+        },
+        {
+          reference: 'ES-DEMO-B-EXPO',
+          venue: venueB,
+          hall: hallB2,
+          title: 'Mumbai Harbour Technology Showcase',
+          type: 'Exhibition',
+          start: '10:30',
+          end: '15:30',
+          reservedStart: '10:00',
+          reservedEnd: '16:00',
+          attendees: 160,
+          projectors: 2,
+          audio: 1,
+          staff: 4,
+          total: 55932,
+          advance: 13983,
+          balance: 41949,
+          note: 'Sample confirmed exhibition booking with shared AV and event support.',
+        },
+        {
+          reference: 'ES-DEMO-C-FORUM',
+          venue: venueC,
+          hall: hallC1,
+          title: 'Powai Founders & Investors Forum',
+          type: 'Conference',
+          start: '15:00',
+          end: '18:00',
+          reservedStart: '14:30',
+          reservedEnd: '18:30',
+          attendees: 75,
+          projectors: 1,
+          audio: 1,
+          staff: 3,
+          total: 15104,
+          advance: 3776,
+          balance: 11328,
+          note: 'Sample confirmed forum booking. Includes 30-minute setup and cleanup buffers.',
+        },
+      ];
 
-      // Booking 2: Workshop
-      db.prepare(`
-        INSERT INTO bookings (
-          booking_reference, client_id, venue_id, allocated_venue_id, hall_id,
-          title, event_type, event_date, start_time, end_time,
-          reserved_start, reserved_end, attendees,
-          projectors, audio_systems, staff,
-          status, amount_due, advance_paid, balance_due, payment_status,
-          decision_note
-        ) VALUES (
-          'ES-2026-A-WORK', ?, ?, ?, ?,
-          'Interactive Design Thinking Workshop', 'Workshop', ?, '11:00', '14:00',
-          '10:30', '14:30', 50,
-          1, 0, 2,
-          'confirmed', 12000, 3000, 9000, 'advance_paid',
-          'Confirmed in Hall A1 (capacity 60). Concurrent with Conference: 2/2 projectors and 5/5 staff fully allocated.'
-        )
-      `).run(clientUser.id, venueA.id, venueA.id, hallA1.id, sampleDate);
+      for (const event of events) {
+        const result = insertSampleBooking.run(
+          event.reference,
+          clientUser.id,
+          event.venue.id,
+          event.venue.id,
+          event.hall.id,
+          event.title,
+          event.type,
+          sampleDate,
+          event.start,
+          event.end,
+          event.reservedStart,
+          event.reservedEnd,
+          event.attendees,
+          event.projectors,
+          event.audio,
+          event.staff,
+          'confirmed',
+          event.total,
+          event.advance,
+          event.balance,
+          'advance_pending',
+          event.note
+        );
+        insertSampleHistory.run(Number(result.lastInsertRowid), clientUser.id, event.note);
+      }
     }
   }
 }
 
-seed();
+export function resetOperationalDataAndSeed(): void {
+  db.transaction(() => {
+    db.prepare('DELETE FROM history').run();
+    db.prepare('DELETE FROM payments').run();
+    db.prepare('DELETE FROM reschedules').run();
+    db.prepare('DELETE FROM waitlist').run();
+    db.prepare('DELETE FROM bookings').run();
+    db.prepare('DELETE FROM images').run();
+    db.prepare('DELETE FROM halls').run();
+    db.prepare('DELETE FROM venues').run();
+    const hasSequenceTable = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
+    ).get();
+    if (hasSequenceTable) {
+      db.prepare("DELETE FROM sqlite_sequence WHERE name IN ('venues','halls','bookings','waitlist','history','images','payments','reschedules')").run();
+    }
+    seed();
+  })();
+}
+
+if (process.env.EVENTSYNC_SKIP_AUTO_SEED !== '1') seed();

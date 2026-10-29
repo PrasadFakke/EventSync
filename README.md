@@ -26,6 +26,8 @@ Set `DEMO_MANAGER_EMAIL` and `DEMO_MANAGER_PASSWORD` before the first server run
 
 To reset demo data, stop the server and delete only `data/eventsync.sqlite` and `data/sessions.sqlite`; the seed is recreated at next startup. Uploaded files in `uploads/` are retained.
 
+To replace venue and event records with the starter sample while keeping existing user accounts, stop the server and run `npm run seed:reset-sample`. This clears venues, halls, bookings, waitlist entries, payment/history records, reschedules, and venue image references; it preserves user accounts and uploaded files. The reset seeds three fictional Mumbai venues and four upcoming sample events.
+
 ## Included workflows
 
 - Public venue discovery, venue details, event types, and role selection.
