@@ -584,12 +584,21 @@ function Portal() {
       else route = '/client/bookings';
     }
 
-    api(route)
-      .then(x => {
-        setData(x);
-        setItems(Array.isArray(x) ? x : []);
-      })
-      .catch(x => setError(x.message));
+    if (manager && path === 'bookings') {
+      Promise.all([api('/manager/bookings'), api('/manager/waitlist')])
+        .then(([bookings, waitlist]) => {
+          setData(bookings);
+          setItems(waitlist);
+        })
+        .catch(x => setError(x.message));
+    } else {
+      api(route)
+        .then(x => {
+          setData(x);
+          setItems(Array.isArray(x) ? x : []);
+        })
+        .catch(x => setError(x.message));
+    }
   };
 
   useEffect(load, [path, manager]);
@@ -622,7 +631,7 @@ function Portal() {
   const links = manager ? managerTabs : clientTabs;
 
   return (
-    <div className="portal">
+    <div className={`portal portal-${manager ? 'manager' : 'client'}`}>
       <aside className="sidebar">
         <Link to="/" className="brand">
           <span className="brand-mark">e</span> EventSync
@@ -655,12 +664,18 @@ function Portal() {
           <span>
             EVENTSYNC 2026 <i>·</i> {manager ? 'OPERATIONS CONTROL' : 'CLIENT SCHEDULING WORKSPACE'}
           </span>
-          <div className="avatar">{user?.name?.slice(0, 1).toUpperCase()}</div>
+          <div className="portal-top-user">
+            <div className="portal-top-user-copy">
+              <b>{user?.name}</b>
+              <small>{manager ? 'Event manager' : 'Client account'}</small>
+            </div>
+            <div className="avatar">{user?.name?.slice(0, 1).toUpperCase()}</div>
+          </div>
         </div>
         <div className="portal-content">
           {error && <p className="form-error">{error}</p>}
           {manager ? (
-            <ManagerContent path={path} data={data} reload={load} />
+            <ManagerContent path={path} data={data} items={items} reload={load} />
           ) : (
             <ClientContent path={path} data={data} items={items} reload={load} />
           )}
@@ -671,7 +686,7 @@ function Portal() {
 }
 
 // ======================== MANAGER CONTENT ========================
-function ManagerContent({ path, data, reload }: { path: string; data: any; reload: () => void }) {
+function ManagerContent({ path, data, items, reload }: { path: string; data: any; items: any[]; reload: () => void }) {
   if (!data && path !== 'dashboard') return <div className="loading">Loading workspace…</div>;
 
   // 1. Operations Dashboard
@@ -718,6 +733,36 @@ function ManagerContent({ path, data, reload }: { path: string; data: any; reloa
         />
         <div className="mb-6">
           <BookingTable rows={data} manager reload={reload} />
+        </div>
+        <h2 className="list-heading">Active Waitlist</h2>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>EVENT</th>
+                <th>CLIENT</th>
+                <th>VENUE</th>
+                <th>DATE & TIME</th>
+                <th>ATTENDEES</th>
+                <th>QUEUE POSITION</th>
+                <th>REASON</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.filter((entry: any) => entry.status === 'active').map((entry: any) => (
+                <tr key={entry.id}>
+                  <td><b>{entry.title}</b></td>
+                  <td>{entry.client}<small>{entry.email}</small></td>
+                  <td>{entry.venue}</td>
+                  <td>{entry.event_date}<small>{entry.start_time}–{entry.end_time}</small></td>
+                  <td>{entry.attendees}</td>
+                  <td><span className="font-bold text-purple-700">Queue #{entry.queue_position}</span></td>
+                  <td>{entry.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!items.some((entry: any) => entry.status === 'active') && <div className="empty">No active waitlist requests.</div>}
         </div>
       </>
     );
@@ -897,6 +942,17 @@ function ManagerContent({ path, data, reload }: { path: string; data: any; reloa
 
 // ======================== CLIENT CONTENT ========================
 function ClientContent({ path, data, items, reload }: { path: string; data: any; items: any[]; reload: () => void }) {
+  async function cancelWaitlist(id: number) {
+    if (!confirm('Leave this waitlist?')) return;
+    try {
+      const result = await api(`/client/waitlist/${id}/cancel`, { method: 'POST' });
+      alert(result.message);
+      reload();
+    } catch (e: any) {
+      alert(e.message);
+    }
+  }
+
   // 1. New Booking (matching screenshot functionality)
   if (path === 'new-booking') {
     return (
@@ -943,7 +999,7 @@ function ClientContent({ path, data, items, reload }: { path: string; data: any;
   if (path === 'waitlist') {
     return (
       <>
-        <PageTitle title="My Waitlist" subtitle="Your waitlisted requests with automatic FIFO promotion when slots open." />
+        <PageTitle title="My Waitlist" subtitle="Track queued requests and see when an available slot promotes your booking." />
         <div className="table-wrap">
           <table>
             <thead>
@@ -954,6 +1010,7 @@ function ClientContent({ path, data, items, reload }: { path: string; data: any;
                 <th>ATTENDEES</th>
                 <th>QUEUE POSITION</th>
                 <th>STATUS</th>
+                <th>ACTIONS</th>
               </tr>
             </thead>
             <tbody>
@@ -963,13 +1020,18 @@ function ClientContent({ path, data, items, reload }: { path: string; data: any;
                   <td>{w.venue}</td>
                   <td>{w.event_date}<small>{w.start_time}–{w.end_time}</small></td>
                   <td>{w.attendees}</td>
-                  <td><span className="font-bold text-purple-700">Queue #{w.queue_position || 1}</span></td>
-                  <td><span className="status pending">{w.status}</span></td>
+                  <td>
+                    {w.status === 'active'
+                      ? <span className="font-bold text-purple-700">Queue #{w.queue_position}</span>
+                      : '—'}
+                  </td>
+                  <td><span className={`status ${w.status === 'promoted' ? 'confirmed' : w.status === 'cancelled' ? 'rejected' : 'pending'}`}>{w.status}</span></td>
+                  <td>{w.status === 'active' ? <button className="mini-action reject" onClick={() => cancelWaitlist(w.id)}>Leave waitlist</button> : '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {!items.length && <div className="empty">You have no active waitlist requests.</div>}
+          {!items.length && <div className="empty">You have no waitlist requests.</div>}
         </div>
       </>
     );

@@ -96,73 +96,144 @@ function getEngineBookings(): BookingEntity[] {
   }));
 }
 
+function resequenceActiveWaitlist(): void {
+  const entries = db.prepare(`
+    SELECT id, venue_id, event_date
+    FROM waitlist
+    WHERE status='active'
+    ORDER BY venue_id ASC, event_date ASC, queue_position ASC, created_at ASC, id ASC
+  `).all() as { id: number; venue_id: number; event_date: string }[];
+  const positions = new Map<string, number>();
+  const updatePosition = db.prepare('UPDATE waitlist SET queue_position=? WHERE id=?');
+  for (const entry of entries) {
+    const key = `${entry.venue_id}:${entry.event_date}`;
+    const position = (positions.get(key) || 0) + 1;
+    positions.set(key, position);
+    updatePosition.run(position, entry.id);
+  }
+}
+
 // FIFO Waitlist promotion helper
 function promoteWaitlistFifo(): any[] {
-  const waitlisted = db.prepare("SELECT * FROM waitlist WHERE status='active' ORDER BY queue_position ASC, created_at ASC").all() as any[];
+  const waitlisted = db.prepare(`
+    SELECT * FROM waitlist
+    WHERE status='active'
+    ORDER BY event_date ASC, venue_id ASC, queue_position ASC, created_at ASC, id ASC
+  `).all() as any[];
   const promotedList: any[] = [];
 
   const venues = getEngineVenues();
   const confirmed = getEngineBookings();
 
   for (const w of waitlisted) {
+    const sourceBooking = w.booking_id
+      ? db.prepare('SELECT * FROM bookings WHERE id=?').get(w.booking_id) as any
+      : null;
+    const projectors = Number(sourceBooking?.projectors || 0);
+    const audioSystems = Number(sourceBooking?.audio_systems || 0);
+    const staff = Number(sourceBooking?.staff || 0);
+    const eventType = sourceBooking?.event_type || 'Conference';
+
     const alloc = allocateEvent(
       {
         title: w.title,
+        event_type: eventType,
         event_date: w.event_date,
         start_time: w.start_time,
         end_time: w.end_time,
         attendees: w.attendees,
         preferred_venue_id: w.venue_id,
-        projectors: 0,
-        audio_systems: 0,
-        staff: 0,
+        projectors,
+        audio_systems: audioSystems,
+        staff,
       },
       venues,
       confirmed
     );
 
     if (alloc.status === 'confirmed') {
-      // Promote!
-      db.prepare("UPDATE waitlist SET status='promoted' WHERE id=?").run(w.id);
-
       const refCode = `ES-${new Date().getFullYear()}-${alloc.allocated_venue_code}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
       const rw = alloc.reserved_window!;
+      const durationHours = (rw.endMinutes - rw.startMinutes) / 60;
+      const pricing = calculateEventPricing(durationHours, 3500, staff);
+      const promotionNote = `Auto-promoted from waitlist (FIFO) into Hall ${alloc.allocated_hall_name} at ${alloc.allocated_venue_name}.`;
 
-      const insert = db.prepare(`
-        INSERT INTO bookings (
-          booking_reference, client_id, venue_id, allocated_venue_id, hall_id,
-          title, event_type, event_date, start_time, end_time,
-          reserved_start, reserved_end, attendees,
-          projectors, audio_systems, staff,
-          status, decision_note, amount_due, advance_paid, balance_due, payment_status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `).run(
-        refCode,
-        w.client_id,
-        w.venue_id,
-        alloc.allocated_venue_id,
-        alloc.allocated_hall_id,
-        w.title,
-        'Waitlist Promoted',
-        w.event_date,
-        w.start_time,
-        w.end_time,
-        rw.reservedStart,
-        rw.reservedEnd,
-        w.attendees,
-        0, 0, 0,
-        'confirmed',
-        `Auto-promoted from waitlist (FIFO) into Hall ${alloc.allocated_hall_name} at ${alloc.allocated_venue_name}.`,
-        10000, 2500, 7500, 'advance_pending'
-      );
+      const newId = db.transaction(() => {
+        const activeEntry = db.prepare("SELECT id FROM waitlist WHERE id=? AND status='active'").get(w.id);
+        if (!activeEntry) return null;
 
-      const newId = Number(insert.lastInsertRowid);
-      db.prepare('INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,?,?)').run(
-        newId,
-        w.client_id,
-        'PROMOTED_FROM_WAITLIST',
-        `Auto-promoted from waitlist (FIFO) to Hall ${alloc.allocated_hall_name}.`
-      );
+        let bookingId: number;
+        if (sourceBooking) {
+          db.prepare(`
+            UPDATE bookings
+            SET booking_reference=coalesce(booking_reference, ?),
+                allocated_venue_id=?, hall_id=?, reserved_start=?, reserved_end=?,
+                projectors=?, audio_systems=?, staff=?, status='confirmed',
+                waitlist_position=0, decision_note=?, amount_due=?, advance_paid=?,
+                balance_due=?, payment_status='advance_pending', updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+          `).run(
+            refCode,
+            alloc.allocated_venue_id,
+            alloc.allocated_hall_id,
+            rw.reservedStart,
+            rw.reservedEnd,
+            projectors,
+            audioSystems,
+            staff,
+            promotionNote,
+            pricing.totalAmount,
+            pricing.advanceDeposit,
+            pricing.balanceDue,
+            sourceBooking.id
+          );
+          bookingId = sourceBooking.id;
+        } else {
+          const result = db.prepare(`
+            INSERT INTO bookings (
+              booking_reference, client_id, venue_id, allocated_venue_id, hall_id,
+              title, event_type, event_date, start_time, end_time,
+              reserved_start, reserved_end, attendees, projectors, audio_systems,
+              staff, status, decision_note, amount_due, advance_paid, balance_due,
+              payment_status
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          `).run(
+            refCode,
+            w.client_id,
+            w.venue_id,
+            alloc.allocated_venue_id,
+            alloc.allocated_hall_id,
+            w.title,
+            eventType,
+            w.event_date,
+            w.start_time,
+            w.end_time,
+            rw.reservedStart,
+            rw.reservedEnd,
+            w.attendees,
+            projectors,
+            audioSystems,
+            staff,
+            'confirmed',
+            promotionNote,
+            pricing.totalAmount,
+            pricing.advanceDeposit,
+            pricing.balanceDue,
+            'advance_pending'
+          );
+          bookingId = Number(result.lastInsertRowid);
+        }
+
+        db.prepare("UPDATE waitlist SET status='promoted' WHERE id=? AND status='active'").run(w.id);
+        db.prepare('INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,?,?)').run(
+          bookingId,
+          w.client_id,
+          'PROMOTED_FROM_WAITLIST',
+          promotionNote
+        );
+        return bookingId;
+      })();
+      if (newId === null) continue;
 
       confirmed.push({
         id: newId,
@@ -174,9 +245,9 @@ function promoteWaitlistFifo(): any[] {
         reserved_start: rw.reservedStart,
         reserved_end: rw.reservedEnd,
         attendees: w.attendees,
-        projectors: 0,
-        audio_systems: 0,
-        staff: 0,
+        projectors,
+        audio_systems: audioSystems,
+        staff,
         status: 'confirmed',
       });
 
@@ -190,6 +261,7 @@ function promoteWaitlistFifo(): any[] {
     }
   }
 
+  resequenceActiveWaitlist();
   return promotedList;
 }
 
@@ -499,6 +571,19 @@ app.post('/api/client/bookings', auth(), (req, res) => {
     confirmed
   );
 
+  const canEverAccommodate = venues.some(venue =>
+    venue.halls.some(hall => hall.capacity >= d.attendees) &&
+    venue.projectors >= d.projectors &&
+    venue.audio_systems >= d.audio_systems &&
+    venue.staff >= d.staff
+  );
+  if (alloc.status !== 'confirmed' && d.join_waitlist && !canEverAccommodate) {
+    return res.status(400).json({
+      error: 'This request exceeds every suitable hall or venue resource capacity, so it cannot be fulfilled from the waitlist.',
+      details: alloc.details,
+    });
+  }
+
   const durationHours = (reservedWindow.endMinutes - reservedWindow.startMinutes) / 60;
   const pricing = calculateEventPricing(durationHours, 3500, d.staff);
   const refCode = `ES-${new Date().getFullYear()}-${alloc.allocated_venue_code || prefVenue.code}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
@@ -599,6 +684,7 @@ app.post('/api/client/bookings', auth(), (req, res) => {
 
     let queuePosition = 0;
     if (d.join_waitlist) {
+      resequenceActiveWaitlist();
       const currentWaitlistCount = Number(
         (db.prepare("SELECT count(*) n FROM waitlist WHERE venue_id=? AND event_date=? AND status='active'").get(
           d.venue_id,
@@ -608,66 +694,68 @@ app.post('/api/client/bookings', auth(), (req, res) => {
       queuePosition = currentWaitlistCount + 1;
     }
 
-    const result = db.prepare(`
-      INSERT INTO bookings (
-        booking_reference, client_id, venue_id, allocated_venue_id, hall_id,
-        title, event_type, event_date, start_time, end_time,
-        reserved_start, reserved_end, attendees,
-        projectors, audio_systems, staff, notes,
-        status, waitlist_position, decision_note, rejection_reason, rejection_details, amount_due
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      refCode,
-      req.session.user!.id,
-      d.venue_id,
-      null,
-      null,
-      d.title,
-      d.event_type,
-      d.event_date,
-      d.start_time,
-      d.end_time,
-      reservedWindow.reservedStart,
-      reservedWindow.reservedEnd,
-      d.attendees,
-      d.projectors,
-      d.audio_systems,
-      d.staff,
-      d.notes,
-      initialStatus,
-      queuePosition,
-      d.join_waitlist ? `Joined waitlist at position #${queuePosition}. Reason: ${alloc.reason}` : (alloc.reason || 'Requested resources or halls not feasible.'),
-      alloc.reason || 'Infeasible scheduling request.',
-      JSON.stringify(alloc.details),
-      0
-    );
-
-    const bookingId = Number(result.lastInsertRowid);
-
-    if (d.join_waitlist) {
-      db.prepare(`
-        INSERT INTO waitlist(booking_id, client_id, venue_id, title, event_date, start_time, end_time, attendees, queue_position, reason)
-        VALUES(?,?,?,?,?,?,?,?,?,?)
+    const bookingId = db.transaction(() => {
+      const result = db.prepare(`
+        INSERT INTO bookings (
+          booking_reference, client_id, venue_id, allocated_venue_id, hall_id,
+          title, event_type, event_date, start_time, end_time,
+          reserved_start, reserved_end, attendees,
+          projectors, audio_systems, staff, notes,
+          status, waitlist_position, decision_note, rejection_reason, rejection_details, amount_due
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
-        bookingId,
+        refCode,
         req.session.user!.id,
         d.venue_id,
+        null,
+        null,
         d.title,
+        d.event_type,
         d.event_date,
         d.start_time,
         d.end_time,
+        reservedWindow.reservedStart,
+        reservedWindow.reservedEnd,
         d.attendees,
+        d.projectors,
+        d.audio_systems,
+        d.staff,
+        d.notes,
+        initialStatus,
         queuePosition,
-        alloc.reason || 'Requested availability requires review'
+        d.join_waitlist ? `Joined waitlist at position #${queuePosition}. Reason: ${alloc.reason}` : (alloc.reason || 'Requested resources or halls not feasible.'),
+        alloc.reason || 'Infeasible scheduling request.',
+        JSON.stringify(alloc.details),
+        0
       );
-    }
+      const id = Number(result.lastInsertRowid);
 
-    db.prepare('INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,?,?)').run(
-      bookingId,
-      req.session.user!.id,
-      initialStatus,
-      alloc.reason || 'Infeasible request.'
-    );
+      if (d.join_waitlist) {
+        db.prepare(`
+          INSERT INTO waitlist(booking_id, client_id, venue_id, title, event_date, start_time, end_time, attendees, queue_position, reason)
+          VALUES(?,?,?,?,?,?,?,?,?,?)
+        `).run(
+          id,
+          req.session.user!.id,
+          d.venue_id,
+          d.title,
+          d.event_date,
+          d.start_time,
+          d.end_time,
+          d.attendees,
+          queuePosition,
+          alloc.reason || 'Requested availability requires review'
+        );
+      }
+
+      db.prepare('INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,?,?)').run(
+        id,
+        req.session.user!.id,
+        initialStatus,
+        alloc.reason || 'Infeasible request.'
+      );
+      return id;
+    })();
 
     return res.status(200).json({
       id: bookingId,
@@ -777,9 +865,11 @@ app.post('/api/client/bookings/:id/reschedule', auth(), (req, res) => {
     `Rescheduled to ${s.data.event_date} ${s.data.start_time}–${s.data.end_time}.`
   );
 
+  const promoted = promoteWaitlistFifo();
   res.json({
     ok: true,
     message: `Rescheduled successfully to ${s.data.event_date} in Hall ${alloc.allocated_hall_name}!`,
+    promoted_from_waitlist: promoted,
     booking: {
       id: b.id,
       event_date: s.data.event_date,
@@ -851,9 +941,40 @@ app.get('/api/client/waitlist', auth(), (req, res) => {
     FROM waitlist w
     JOIN venues v ON v.id = w.venue_id
     WHERE w.client_id=?
-    ORDER BY w.created_at DESC
+    ORDER BY w.event_date ASC, w.venue_id ASC, w.queue_position ASC, w.created_at DESC
   `).all(req.session.user!.id);
   res.json(rows);
+});
+
+app.post('/api/client/waitlist/:id/cancel', auth(), (req, res) => {
+  const entry = db.prepare('SELECT * FROM waitlist WHERE id=? AND client_id=?').get(
+    req.params.id,
+    req.session.user!.id
+  ) as any;
+  if (!entry) return res.status(404).json({ error: 'Waitlist request not found.' });
+  if (entry.status !== 'active') {
+    return res.status(400).json({ error: 'Only active waitlist requests can be cancelled.' });
+  }
+
+  db.transaction(() => {
+    db.prepare("UPDATE waitlist SET status='cancelled' WHERE id=? AND status='active'").run(entry.id);
+    if (entry.booking_id) {
+      db.prepare(`
+        UPDATE bookings
+        SET status='cancelled', decision_note='Client left the waitlist.', updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND status='waitlisted'
+      `).run(entry.booking_id);
+      db.prepare('INSERT INTO history(booking_id, actor_id, action, note) VALUES(?,?,?,?)').run(
+        entry.booking_id,
+        req.session.user!.id,
+        'cancelled',
+        'Client cancelled the waitlist request.'
+      );
+    }
+    resequenceActiveWaitlist();
+  })();
+
+  res.json({ ok: true, message: 'Waitlist request cancelled.' });
 });
 
 app.post('/api/client/waitlist', auth(), (req, res) => {
@@ -870,6 +991,7 @@ app.post('/api/client/waitlist', auth(), (req, res) => {
     return res.status(400).json({ error: 'Provide valid event details for the waitlist.' });
   }
 
+  resequenceActiveWaitlist();
   const queueCount = Number(
     (db.prepare("SELECT count(*) n FROM waitlist WHERE venue_id=? AND event_date=? AND status='active'").get(
       s.data.venue_id,
